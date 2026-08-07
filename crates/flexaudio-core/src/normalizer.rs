@@ -7,13 +7,12 @@
 //!   │   ・チャンネル mix（→stereo）
 //!   │   ・SR 変換（rubato, →48000）
 //!   ▼
-//! 内部正規形: f32 / 48000 Hz / stereo / 20ms = 960 frame
+//! 内部正規形: f32 / 48000 Hz / stereo / 設定可能なチャンク長
 //!   │  第 2 段（出口・新規）
 //!   │   ・チャンネル変換（stereo→mono 平均 / mono→stereo 複製 / そのまま）
 //!   │   ・SR 変換（rubato, 48000→output.sample_rate。等しければパススルー）
 //!   ▼
-//! 出力: f32 / output.sample_rate / output.channels / 時間ベース 20ms 固定
-//!        （48k=960 / 16k=320 / 8k=160 frame）
+//! 出力: f32 / output.sample_rate / output.channels / 設定されたチャンク長
 //! ```
 //!
 //! 既定の出力 `{48000, 2}` なら第 2 段は丸ごとパススルー（内部正規形がそのまま出る）。
@@ -21,7 +20,7 @@
 //! `output.sample_rate == 48000` でそれぞれパススルーになる。
 //!
 //! どちらの rubato リサンプラも `FixedAsync::Input`（固定入力チャンク）で、生成された
-//! 可変長出力を内部 accumulator に集約し、20ms 相当の境界で切り出す。端数はリサンプラ
+//! 可変長出力を内部 accumulator に集約し、設定されたチャンク長の境界で切り出す。端数はリサンプラ
 //! 内部と accumulator が次へ持ち越す。
 //!
 //! PTS は出力チャンク先頭サンプルに対応する device_pts を、入力→出力サンプルオフセット
@@ -35,7 +34,10 @@ use rubato::{
 
 use crate::types::{Error, OutputFormat, Result, CHANNELS, SAMPLE_RATE};
 
-/// 内部正規形 1 チャンクのフレーム数（20ms @ 48kHz）。第 1 段の切り出し境界。
+/// 既定チャンク長（ミリ秒）。
+pub const DEFAULT_CHUNK_MS: u32 = 20;
+
+/// 内部正規形 1 チャンクの既定フレーム数（20ms @ 48kHz）。
 pub const CHUNK_FRAMES: usize = 960;
 
 /// 内部正規形のチャンネル数（stereo）。
@@ -96,7 +98,7 @@ pub struct Normalizer {
 }
 
 /// 1 つの出力タップ。共有の内部正規形（48k/stereo）を受け、チャンネル変換 + SR 変換で
-/// 自身の [`OutputFormat`] へ再変換し、20ms 固定チャンクを切り出す。各タップは独立の
+/// 自身の [`OutputFormat`] へ再変換し、設定された長さのチャンクを切り出す。各タップは独立の
 /// PTS アンカー・出力バッファを持つ（主副で PTS が数十msズレる理由）。
 struct OutputTap {
     output: OutputFormat,
@@ -104,8 +106,10 @@ struct OutputTap {
     stage2: Option<OutputStage>,
     /// 完成待ちの出力（output.channels の interleaved）。`pop` がここから切る。
     out_buf: Vec<f32>,
-    /// 出力 1 チャンクのフレーム数（`output.chunk_frames()`）。
+    /// 出力 1 チャンクのフレーム数。
     out_chunk_frames: usize,
+    /// チャンク長（ミリ秒）。副タップの構築にも使う。
+    chunk_ms: u32,
     /// 出力チャンネル数。
     out_channels: usize,
     /// `out_buf` 先頭（まだ pop していない最古サンプル）に対応する出力フレーム索引。
@@ -152,7 +156,13 @@ struct OutputStage {
 }
 
 impl Normalizer {
-    /// 入力 SR / 入力チャンネル数 / 出力フォーマットを指定して正規化器を作る。
+    /// 入力 SR / 入力チャンネル数 / 出力フォーマットを指定して、既定の 20ms
+    /// チャンクで正規化器を作る。
+    pub fn new(in_sample_rate: u32, in_channels: u16, output: OutputFormat) -> Result<Self> {
+        Self::new_with_chunk_ms(in_sample_rate, in_channels, output, DEFAULT_CHUNK_MS)
+    }
+
+    /// 入力 SR / 入力チャンネル数 / 出力フォーマット / チャンク長を指定して正規化器を作る。
     ///
     /// 第 1 段は入力を 48k/stereo へ正規化する（`in_sample_rate == 48000` なら SR
     /// パススルー、`in_channels` が 1 なら mono→stereo 複製、2 はそのまま、3 以上は
@@ -165,24 +175,39 @@ impl Normalizer {
     /// rubato リサンプラの構築は極端なレート比などで失敗し得る。panic させると非 RT
     /// の取り込みスレッドが無言で止まるため、失敗時は [`Error::Backend`] を返して
     /// 呼び出し側に伝播させる。
-    pub fn new(in_sample_rate: u32, in_channels: u16, output: OutputFormat) -> Result<Self> {
+    pub fn new_with_chunk_ms(
+        in_sample_rate: u32,
+        in_channels: u16,
+        output: OutputFormat,
+        chunk_ms: u32,
+    ) -> Result<Self> {
+        if chunk_ms == 0 {
+            return Err(Error::InvalidArg("chunk_ms must be > 0".into()));
+        }
         let in_channels = in_channels.max(1) as usize;
 
         // 第 1 段リサンプラ（→48000）。全出力タップで 1 度だけ実行する。
         let stage1_resampler = if in_sample_rate == SAMPLE_RATE {
             None
         } else {
-            Some(ResamplerState::new(in_sample_rate, SAMPLE_RATE, INNER_CH)?)
+            Some(ResamplerState::new(
+                in_sample_rate,
+                SAMPLE_RATE,
+                INNER_CH,
+                chunk_ms,
+            )?)
         };
 
         Ok(Self {
             in_sample_rate,
             in_channels,
             stage1_resampler,
-            inner_scratch: Vec::with_capacity(CHUNK_FRAMES * INNER_CH * 4),
+            inner_scratch: Vec::with_capacity(
+                (SAMPLE_RATE as u64 * chunk_ms as u64 / 1000).max(1) as usize * INNER_CH * 4,
+            ),
             total_inner_frames: 0,
             inner_processor: None,
-            primary: OutputTap::new(output)?,
+            primary: OutputTap::new(output, chunk_ms)?,
             secondary: None,
         })
     }
@@ -190,10 +215,10 @@ impl Normalizer {
     /// 副出力タップを追加する（[`OutputFormat::validate`] 済みであることを期待する）。
     ///
     /// 内部正規形（48k/stereo）は 1 度だけ生成して主・副の両第 2 段へ供給する。副タップは
-    /// 独立の第 2 段・PTS 状態を持ち、主とは別に 20ms 固定チャンクを生成する。rubato 構築
+    /// 独立の第 2 段・PTS 状態を持ち、主とは別に設定された長さのチャンクを生成する。rubato 構築
     /// 失敗時は [`Error::Backend`]。
     pub fn with_secondary(mut self, secondary: OutputFormat) -> Result<Self> {
-        self.secondary = Some(OutputTap::new(secondary)?);
+        self.secondary = Some(OutputTap::new(secondary, self.primary.chunk_ms)?);
         Ok(self)
     }
 
@@ -374,16 +399,20 @@ impl Normalizer {
 }
 
 impl OutputTap {
-    /// 出力フォーマットから出力タップを作る（`output` は検証済みを期待する）。
-    fn new(output: OutputFormat) -> Result<Self> {
+    /// 出力フォーマットとチャンク長から出力タップを作る（`output` は検証済みを期待する）。
+    fn new(output: OutputFormat, chunk_ms: u32) -> Result<Self> {
         let out_channels = (output.channels.max(1)) as usize;
-        let out_chunk_frames = output.chunk_frames().max(1);
+        let out_chunk_frames = output.chunk_frames_for(chunk_ms).max(1);
 
         // 出力が内部正規形と完全一致なら第 2 段は不要（パススルー）。
         let stage2 = if output.sample_rate == SAMPLE_RATE && out_channels == INNER_CH {
             None
         } else {
-            Some(OutputStage::new(output.sample_rate, out_channels)?)
+            Some(OutputStage::new(
+                output.sample_rate,
+                out_channels,
+                chunk_ms,
+            )?)
         };
 
         Ok(Self {
@@ -391,6 +420,7 @@ impl OutputTap {
             stage2,
             out_buf: Vec::with_capacity(out_chunk_frames * out_channels * 4),
             out_chunk_frames,
+            chunk_ms,
             out_channels,
             out_frame_origin: 0,
             pts_anchor: None,
@@ -426,7 +456,7 @@ impl OutputTap {
     }
 
     /// 停止時フラッシュ。第 2 段リサンプラの残余を吐き出し、末尾の端数チャンクを無音で
-    /// パディングして 20ms 固定境界へ揃える（`pop` で取り切れるようにする）。
+    /// パディングして設定されたチャンク境界へ揃える（`pop` で取り切れるようにする）。
     fn flush(&mut self) {
         if let Some(stage) = self.stage2.as_mut() {
             // リサンプラのフラッシュ失敗はベストエフォートで無視（末尾数 ms の欠落のみ）。
@@ -478,10 +508,13 @@ impl ResamplerState {
     ///
     /// rubato の構築失敗時は [`Error::Backend`] を返す（panic させてスレッドを無言で
     /// 止めない）。
-    fn new(in_sr: u32, out_sr: u32, channels: usize) -> Result<Self> {
+    fn new(in_sr: u32, out_sr: u32, channels: usize, chunk_ms: u32) -> Result<Self> {
         let ratio = out_sr as f64 / in_sr as f64;
-        // 固定入力チャンクは 20ms 相当の入力フレーム（端数は rubato が内部に保持する）。
-        let chunk_in_frames = (in_sr as usize / 50).max(64);
+        // 固定入力チャンクは設定された長さ相当の入力フレーム（端数は rubato が内部に保持する）。
+        let chunk_in_frames = ((in_sr as u64 * chunk_ms as u64) / 1000)
+            .max(64)
+            .try_into()
+            .unwrap_or(usize::MAX);
 
         let params = SincInterpolationParameters {
             sinc_len: 128,
@@ -608,11 +641,11 @@ impl ResamplerState {
 }
 
 impl OutputStage {
-    /// 出力レート / 出力チャンネル数を指定して出口段を作る。
+    /// 出力レート / 出力チャンネル数 / チャンク長を指定して出口段を作る。
     ///
     /// `out_sample_rate == 48000` なら SR 変換はパススルー（チャンネル変換のみ）。
     /// rubato 構築失敗は [`Error::Backend`] として伝播する。
-    fn new(out_sample_rate: u32, out_channels: usize) -> Result<Self> {
+    fn new(out_sample_rate: u32, out_channels: usize, chunk_ms: u32) -> Result<Self> {
         let resampler = if out_sample_rate == SAMPLE_RATE {
             None
         } else {
@@ -621,6 +654,7 @@ impl OutputStage {
                 SAMPLE_RATE,
                 out_sample_rate,
                 out_channels,
+                chunk_ms,
             )?)
         };
         Ok(Self {
@@ -732,6 +766,22 @@ mod tests {
         // ちょうど 2 チャンク取り出せ、端数 100 frame は残る。
         assert_eq!(got_frames, CHUNK_FRAMES * 2);
         assert_eq!(n.buffered_out_frames(), 100);
+    }
+
+    #[test]
+    fn custom_chunk_duration_changes_chunk_shape_and_pts() {
+        let mut n =
+            Normalizer::new_with_chunk_ms(48_000, 2, default_out(), 10).expect("normalizer");
+        let stereo = vec![0.25f32; (48_000 / 100) * 2 * 3];
+        n.push(&stereo, 1_000_000_000).expect("push");
+
+        let mut chunks = Vec::new();
+        while let Some((chunk, pts)) = n.pop_chunk() {
+            chunks.push((chunk, pts));
+        }
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|(chunk, _)| chunk.len() == 480 * 2));
+        assert!((chunks[1].1 - chunks[0].1 - 10_000_000).abs() <= 1_000);
     }
 
     #[test]
@@ -1337,7 +1387,7 @@ mod tests {
         // flush 後に末尾チャンクが 1 つ以上追加される（残余の吐き出し）。
         let mut after = 0usize;
         while let Some((c, _)) = n.pop_secondary() {
-            assert_eq!(c.len(), 320, "副は 20ms 固定境界へ揃う");
+            assert_eq!(c.len(), 320, "副は既定の 20ms 境界へ揃う");
             after += 1;
         }
         assert!(after >= 1, "flush で副タップの末尾が吐き出されるはず");

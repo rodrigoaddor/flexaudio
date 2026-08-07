@@ -7,8 +7,8 @@
 //! 出力フォーマットは `--output-rate <Hz>`（既定 48000）と
 //! `--output-channels <1|2>`（既定 2）で指定する。内部正規形（48k/stereo）から
 //! 第 2 段リサンプラ（rubato・アンチエイリアス込み）で再変換し、WAV ヘッダ・stdout の
-//! rate/ch もこれに追従する。チャンクは時間ベース 20ms 固定なので、レートで 1 チャンクの
-//! フレーム数が変わる（48k=960 / 16k=320）。
+//! rate/ch もこれに追従する。チャンク長は `--chunk-ms`（既定 20ms）で指定でき、レート
+//! に応じて 1 チャンクのフレーム数が変わる。
 //!
 //! ```text
 //! flexaudio-cli --source mic --seconds 5 --out mic.wav
@@ -204,6 +204,10 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     output_channels: u16,
 
+    /// キャプチャチャンクの長さ（ミリ秒）。既定 20。1 以上。
+    #[arg(long, default_value_t = 20)]
+    chunk_ms: u32,
+
     /// 入力ゲイン（線形倍率）。既定 1.0。1.0 でそのまま、2.0 で約 +6dB、0.0 で無音。
     /// 乗算後のサンプルは ±1.0 にクランプされる。負・NaN はエラー。
     #[arg(long, default_value_t = 1.0)]
@@ -328,6 +332,7 @@ fn config_for_kind(cli: &Cli, kind: SourceKind) -> StreamConfig {
     StreamConfig {
         kind,
         output: cli.output_format(),
+        chunk_ms: cli.chunk_ms,
         target_pid: cli.process_id,
         // mode は process セグメントでのみ効く（mic/system では facade が無視）。
         mode: cli.mode.into(),
@@ -572,6 +577,7 @@ fn run(cli: &Cli) -> std::result::Result<(), String> {
     let config = StreamConfig {
         kind,
         output,
+        chunk_ms: cli.chunk_ms,
         target_pid: cli.process_id,
         // mode は process 専用。include 既定。
         mode: cli.mode.into(),
@@ -1703,7 +1709,7 @@ mod tests {
     }
 
     /// 分割境界の計算（フレーム数ベースの決定論）: 16kHz mono / split 1 秒（しきい値
-    /// 16000 フレーム）へ 20ms チャンク（320 フレーム）を 150 個書くと、ちょうど
+    /// 16000 フレーム）へ既定の 20ms チャンク（320 フレーム）を 150 個書くと、ちょうど
     /// 50 個ずつの 3 ファイルになり、合計フレーム数が一致する（欠落ゼロ）。
     #[test]
     fn rotating_writer_splits_exactly_on_multiple() {

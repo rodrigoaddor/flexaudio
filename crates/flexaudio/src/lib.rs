@@ -158,6 +158,9 @@ pub fn watch_devices() -> Result<DeviceWatcher> {
 /// # Ok::<(), flexaudio::Error>(())
 /// ```
 pub fn open(config: StreamConfig) -> Result<Stream> {
+    if config.chunk_ms == 0 {
+        return Err(Error::InvalidArg("chunk_ms must be > 0".into()));
+    }
     // 出力フォーマットを先に弾く（Stream::open でも再検証されるが、backend を構築する
     // 前にエラーを返したい）。
     config.output.validate()?;

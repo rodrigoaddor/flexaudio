@@ -30,7 +30,7 @@ use flexaudio_core::types::{Error, OutputFormat, Result, CHANNELS, SAMPLE_RATE};
 use crate::stream::RAW_RING_SAMPLES;
 
 /// 片側が供給ゼロのままこの時間を超えたら、不足分を無音（0.0）として合成を続行する。
-/// 根拠: 正規化は 20ms チャンク単位でしか出てこないので、2〜3 チャンク分の到着ゆらぎ
+/// 根拠: 子レーンの既定正規化は 20ms チャンク単位で、2〜3 チャンク分の到着ゆらぎ
 /// までは正常とみなし、それを超えた途絶（例: システム側が何も再生していない時間帯）
 /// でも録音全体は流れ続けるようにする。
 const STARVATION_FILL_THRESHOLD: Duration = Duration::from_millis(60);

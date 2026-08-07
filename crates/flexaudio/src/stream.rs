@@ -90,8 +90,9 @@ fn build_normalizer(
     channels: u16,
     output: OutputFormat,
     secondary_output: Option<OutputFormat>,
+    chunk_ms: u32,
 ) -> Result<Normalizer> {
-    let mut n = Normalizer::new(rate, channels, output)?;
+    let mut n = Normalizer::new_with_chunk_ms(rate, channels, output, chunk_ms)?;
     if let Some(sec) = secondary_output {
         n = n.with_secondary(sec)?;
     }
@@ -255,12 +256,15 @@ fn stop_backend_catching(be: &mut Box<dyn CaptureBackend>) -> bool {
 impl Stream {
     /// 構成と backend からストリームを開く（まだキャプチャは始めない）。
     ///
-    /// `config.chunk_ms` は固定契約上 20ms 前提。`ring_capacity_chunks` が
-    /// チャンクリング容量になる。backend の [`native_format`](CaptureBackend::native_format)
-    /// から [`Normalizer`] を構成する。
+    /// `config.chunk_ms` が出力チャンクの長さを決める（既定 20ms）。
+    /// `ring_capacity_chunks` がチャンクリング容量になる。backend の
+    /// [`native_format`](CaptureBackend::native_format) から [`Normalizer`] を構成する。
     pub fn open(config: StreamConfig, backend: Box<dyn CaptureBackend>) -> Result<Stream> {
         if config.ring_capacity_chunks == 0 {
             return Err(Error::InvalidArg("ring_capacity_chunks must be > 0".into()));
+        }
+        if config.chunk_ms == 0 {
+            return Err(Error::InvalidArg("chunk_ms must be > 0".into()));
         }
         // 入力ゲインは有限かつ 0.0 以上（NaN・無限大・負は InvalidArg）。
         if !config.gain.is_finite() || config.gain < 0.0 {
@@ -374,6 +378,7 @@ impl Stream {
             .unwrap_or_else(|e| e.into_inner());
         let output = self.config.output;
         let secondary_output = self.config.secondary_output;
+        let chunk_ms = self.config.chunk_ms;
         let worker = thread::Builder::new()
             .name("flexaudio-intake".into())
             .spawn(move || {
@@ -384,6 +389,7 @@ impl Stream {
                     initial_native,
                     output,
                     secondary_output,
+                    chunk_ms,
                 );
             })
             .map_err(|e| Error::Backend(format!("spawn intake thread: {e}")))?;
@@ -468,7 +474,7 @@ impl Stream {
 
     /// 入力ゲイン（線形倍率）を変更する。1.0=そのまま、2.0=約+6dB、0.0=無音。
     ///
-    /// 録音中いつでも呼べて、次の完成チャンクから効く（チャンクは 20ms 粒度）。
+    /// 録音中いつでも呼べて、次の完成チャンクから効く（チャンクは設定した粒度）。
     /// 乗算後のサンプルは `-1.0..=1.0` にクランプされる。1.0 のときはサンプルに
     /// 一切触れない（バイト完全パススルー）。有限かつ 0.0 以上でなければ
     /// [`Error::InvalidArg`]（現在値は変わらない）。
@@ -492,8 +498,8 @@ impl Stream {
     /// 完成済みチャンクを 1 つ取り出す（非ブロッキング）。無ければ `None`。
     ///
     /// 返るチャンクは出力フォーマット（`config.output`）の interleaved `f32`。
-    /// チャンクは時間ベース 20ms 固定で `data.len() == frames * output.channels`。
-    /// 既定 `{48000, 2}` なら `frames == 960`（`data.len() == 1920`）。
+    /// チャンクは `config.chunk_ms` の時間幅で `data.len() == frames * output.channels`。
+    /// 既定の 20ms・`{48000, 2}` なら `frames == 960`（`data.len() == 1920`）。
     /// `peak`/`rms` は最終 data に対して算出済み。`seq` は単調増加。
     pub fn poll_chunk(&mut self) -> Option<AudioChunk> {
         self.chunk_consumer.try_pop()
@@ -847,16 +853,18 @@ fn run_intake(
     initial_native: (u32, u16),
     output: OutputFormat,
     secondary_output: Option<OutputFormat>,
+    chunk_ms: u32,
 ) {
     let (mut rate, mut channels) = initial_native;
     // Normalizer 構築失敗（rubato 構築失敗等）は無言で死なせず Event::Error を出して終了。
-    let mut normalizer = match build_normalizer(&shared, rate, channels, output, secondary_output) {
-        Ok(n) => n,
-        Err(e) => {
-            shared.push_event(Event::Error(format!("normalizer init failed: {e}")));
-            return;
-        }
-    };
+    let mut normalizer =
+        match build_normalizer(&shared, rate, channels, output, secondary_output, chunk_ms) {
+            Ok(n) => n,
+            Err(e) => {
+                shared.push_event(Event::Error(format!("normalizer init failed: {e}")));
+                return;
+            }
+        };
     let mut clock = ClockNormalizer::new();
     let mut seq: u64 = 0; // 主タップ seq。
     let mut sec_seq: u64 = 0; // 副タップ seq（主とは別カウンタ）。
@@ -902,15 +910,17 @@ fn run_intake(
                 .unwrap_or_else(|e| e.into_inner());
             rate = nf.0;
             channels = nf.1;
-            normalizer = match build_normalizer(&shared, rate, channels, output, secondary_output) {
-                Ok(n) => n,
-                Err(e) => {
-                    shared.push_event(Event::Error(format!(
-                        "normalizer rebuild failed after source change: {e}"
-                    )));
-                    return;
-                }
-            };
+            normalizer =
+                match build_normalizer(&shared, rate, channels, output, secondary_output, chunk_ms)
+                {
+                    Ok(n) => n,
+                    Err(e) => {
+                        shared.push_event(Event::Error(format!(
+                            "normalizer rebuild failed after source change: {e}"
+                        )));
+                        return;
+                    }
+                };
             clock = ClockNormalizer::new();
             // 新しい RawConsumer は overflow を 0 起点から数える（偽の巨大差分を避ける）。
             overflow_baseline = 0;
@@ -1157,7 +1167,7 @@ fn run_watchdog(shared: Arc<SharedState>) {
 /// 出力フォーマットの最終 interleaved `data` から peak（全サンプル絶対値の最大）と
 /// rms（二乗平均平方根・線形）を求める。
 ///
-/// 20ms チャンク（最大 1920 サンプル）に対する 1 走査なので極小コスト。空 data は
+/// 既定 20ms チャンク（最大 1920 サンプル）に対する 1 走査なので極小コスト。空 data は
 /// `(0.0, 0.0)`。
 fn peak_rms(data: &[f32]) -> (f32, f32) {
     if data.is_empty() {
@@ -1256,6 +1266,20 @@ mod tests {
             ..Default::default()
         };
         let err = open_err(Stream::open(config, backend), "容量 0");
+        assert!(
+            matches!(err, Error::InvalidArg(_)),
+            "InvalidArg のはず: {err:?}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_zero_chunk_duration() {
+        let backend = Box::new(MockBackend::new(48_000, 2, 440.0));
+        let config = StreamConfig {
+            chunk_ms: 0,
+            ..Default::default()
+        };
+        let err = open_err(Stream::open(config, backend), "チャンク長 0");
         assert!(
             matches!(err, Error::InvalidArg(_)),
             "InvalidArg のはず: {err:?}"

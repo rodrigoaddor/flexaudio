@@ -1,15 +1,14 @@
 //! flexaudio-core — OS 非依存コア。
 //!
 //! デスクトップ音声キャプチャ抽象化ライブラリ `flexaudio` の OS 非依存部分。
-//! リングバッファ / SR 変換 / チャンネル mix / 20ms チャンク化 / クロック正規化 /
+//! リングバッファ / SR 変換 / チャンネル mix / 可変長チャンク化 / クロック正規化 /
 //! イベント・型定義を提供する。OS 固有のキャプチャは [`backend::CaptureBackend`] を
 //! 実装する別 crate（`flexaudio-os-*`）が担い、facade 層が両者を配線する。
 //!
-//! # 固定契約
-//! 内部処理はすべて interleaved `f32` / 48000 Hz / ステレオ 2ch / 20ms = 960
-//! frames/chunk で行う。外部へ出すレート/チャンネルは [`OutputFormat`] で変えられ
-//! （Normalizer 第 2 段が再変換。例 16k/1ch は 320 frames/chunk）、出力チャンクは
-//! レートに依らず時間ベースで 20ms。
+//! # 契約
+//! 内部処理はすべて interleaved `f32` / 48000 Hz / ステレオ 2ch で行う。外部へ出す
+//! レート/チャンネルは [`OutputFormat`]、チャンク長は [`StreamConfig::chunk_ms`] で
+//! 変えられる（既定 20ms、16k/1ch なら 320 frames/chunk）。
 //!
 //! 公開 API にコールバックは無い。RT スレッドは push のみ、消費側は poll する。
 //! RT 経路は非ブロッキング（満杯時は DROP_OLDEST / overflow ドロップ）。PTS は
@@ -40,7 +39,7 @@ pub mod types;
 pub use backend::{CaptureBackend, RawSink};
 pub use chunk_ring::{chunk_ring, ChunkConsumer, ChunkProducer};
 pub use clock::{monotonic_now_ns, ClockNormalizer};
-pub use normalizer::{InnerProcessor, Normalizer, CHUNK_FRAMES};
+pub use normalizer::{InnerProcessor, Normalizer, CHUNK_FRAMES, DEFAULT_CHUNK_MS};
 pub use quant::quantize_i16;
 pub use raw_ring::{raw_ring, RawConsumer, RawProducer};
 pub use secondary_ring::{secondary_chunk_ring, SecondaryChunkConsumer, SecondaryChunkProducer};

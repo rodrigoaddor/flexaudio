@@ -35,11 +35,8 @@ use flexaudio_denoise::{DenoiseError, Denoiser as CoreDenoiser};
 use flexaudio_encode::{EncodeError, FlacWriter};
 use flexaudio_vad::{Vad as CoreVad, VadConfig, VadError, VadEvent};
 
-/// 副タップのペア合成の pts 窓（60ms = 3 チャンク）。副は主に対し 20〜60ms 遅れるので、
-/// この窓なら最大 3 チャンク遅れても時刻対応が取れる。
-const PAIR_WINDOW_NS: i64 = 60_000_000;
-/// 20ms チャンクの ns 幅。
-const CHUNK_SPAN_NS: i64 = 20_000_000;
+/// 副タップのペア合成で許容する遅延（チャンク数）。
+const PAIR_WINDOW_CHUNKS: i64 = 3;
 
 /// Default `max_speech_ms` for the integrated VAD path (`openStream`), used only
 /// when the caller leaves `vad.maxSpeechMs` unset. silero's own default is 0
@@ -639,7 +636,7 @@ struct SecondaryTapCfg {
 }
 
 /// bridge スレッドの emit 状態。主/副チャンクを JS 化し、統合 VAD を選択タップへかけ、
-/// pts 窓（60ms）でペア合成して `onChunk` へ届ける。
+/// pts 窓（チャンク長の 3 倍）でペア合成して `onChunk` へ届ける。
 ///
 /// denoise は core（内部正規形）へ移設済みでここには無い。VAD は単一インスタンスを単一
 /// タップに束縛し（`vad_tap`）、量子化前の f32 を Rust 内で食う。副 s16 化は VAD の後。
@@ -665,6 +662,9 @@ struct PairingBridge {
     /// 主タップの出力フォーマット（VAD が primary のとき `process_pcm` へ渡す）。
     output_rate: u32,
     output_channels: u16,
+    /// 主チャンクの時間幅と、主副のペアリング窓。
+    chunk_span_ns: i64,
+    pair_window_ns: i64,
     /// 副タップのフォーマット・エンコーディング（設定時のみ）。
     secondary: Option<SecondaryTapCfg>,
     /// ペア合成用 FIFO。主・副とも毎周回すべてドレインしてから pts 窓で突き合わせる。
@@ -767,7 +767,7 @@ impl PairingBridge {
 
     /// 実行中の `flushVad`（`FlexStream.flushVad`）。開いている発話を確定し、最終イベントを
     /// 次に届く VAD タップのチャンクの `vadEvents` 先頭へ差し込む（pending）。常時タップなら
-    /// 20ms 毎にチャンクが流れるので遅延 ≤ 1 チャンク。
+    /// 設定されたチャンク長ごとに流れるので遅延は ≤ 1 チャンク。
     fn flush_vad(&mut self) {
         let js = self.flush_vad_events();
         if !js.is_empty() {
@@ -928,11 +928,11 @@ impl PairingBridge {
                 match self.secondary_fifo.front() {
                     None => break None,
                     Some(s) => {
-                        if s.pts_ns < p_pts - PAIR_WINDOW_NS / 2 {
+                        if s.pts_ns < p_pts - self.pair_window_ns / 2 {
                             // 副が古すぎ（主が捨てられた等）→ orphan 破棄して次の副へ。
                             self.secondary_fifo.pop_front();
                             continue;
-                        } else if s.pts_ns < p_pts + CHUNK_SPAN_NS + PAIR_WINDOW_NS / 2 {
+                        } else if s.pts_ns < p_pts + self.chunk_span_ns + self.pair_window_ns / 2 {
                             // 窓内 → 対応。
                             break self.secondary_fifo.pop_front();
                         } else {
@@ -1181,7 +1181,7 @@ impl FlexStream {
     /// silero は無音が来ない限り `speechEnd` を出さないので、認識を一時停止する・録音末尾で
     /// 最後の発話を確定したいときにこれを呼ぶ。開いている発話があれば最終 `speechEnd`（と対の
     /// `speechStart`）が、次に届くタップのチャンクの `vadEvents`（録音 0 起点 `atNs` 付き）
-    /// 先頭に載る（20ms 毎にチャンクが流れるので遅延 ≤ 1 チャンク）。呼び出し後 VAD は
+    /// 先頭に載る（設定されたチャンク長ごとに流れるので遅延は ≤ 1 チャンク）。呼び出し後 VAD は
     /// リセットされ、次の発話は新しい文脈で拾う。
     ///
     /// これは **config を変えない**（`secondaryOutput`/encoding の open 時固定＝`switchSource`
@@ -1375,6 +1375,8 @@ pub fn open_stream(
         None => (None, 16_000),
     };
 
+    let chunk_span_ns = config.chunk_ms as i64 * 1_000_000;
+    let pair_window_ns = chunk_span_ns * PAIR_WINDOW_CHUNKS;
     let mut stream = flexaudio::open(config).map_err(to_napi_err)?;
     if denoise_enabled {
         stream.set_denoise(true);
@@ -1393,6 +1395,8 @@ pub fn open_stream(
         pending_flush_events: Vec::new(),
         output_rate,
         output_channels,
+        chunk_span_ns,
+        pair_window_ns,
         secondary,
         primary_fifo: VecDeque::new(),
         secondary_fifo: VecDeque::new(),
@@ -1530,6 +1534,8 @@ pub fn open_mock_stream(
         pending_flush_events: Vec::new(),
         output_rate: sample_rate,
         output_channels: channels,
+        chunk_span_ns: 20_000_000,
+        pair_window_ns: 60_000_000,
         secondary: secondary_cfg,
         primary_fifo: VecDeque::new(),
         secondary_fifo: VecDeque::new(),

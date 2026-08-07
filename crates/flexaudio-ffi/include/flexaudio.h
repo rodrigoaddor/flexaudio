@@ -332,7 +332,7 @@ int32_t flexaudio_resume(struct FlexStream *s);
 bool flexaudio_is_paused(const struct FlexStream *s);
 
 // 入力ゲイン（線形倍率）を変更する。1.0 でそのまま、2.0 で約 +6dB、0.0 で無音。
-// 録音中いつでも呼べて、次のチャンクから効く（20ms 粒度）。乗算後のサンプルは
+// 録音中いつでも呼べて、次のチャンクから効く（設定されたチャンク粒度）。乗算後のサンプルは
 // ±1.0 にクランプされる。有限かつ 0 以上でなければ FLEX_INVALID_ARG。
 //
 // # Safety

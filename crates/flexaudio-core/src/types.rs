@@ -1,14 +1,15 @@
 //! 共有型: 内部正規形の定数 / [`AudioChunk`] / [`ChunkFlags`] / [`SourceKind`] /
 //! [`OutputFormat`] / [`StreamConfig`] / [`Event`] / [`Error`]。
 //!
-//! 内部正規形は interleaved `f32` / 48000 Hz / ステレオ 2ch / 20ms = 960
-//! frames per chunk。
+//! 内部正規形は interleaved `f32` / 48000 Hz / ステレオ 2ch で、チャンク長は
+//! [`StreamConfig::chunk_ms`]（既定 20ms）で決まる。
 //!
 //! 出力フォーマットは [`OutputFormat`] で指定する（既定 `{48000, 2}`）。
 //! Normalizer 第 2 段が内部正規形からそのレート/チャンネルへ再変換する。出力
-//! チャンクは時間ベースで 20ms なので、レートに応じて [`AudioChunk::frames`] が
-//! 変わる（48k=960 / 16k=320 / 8k=160）。既定 `{48000, 2}` のときは第 2 段が
-//! パススルーになり、内部正規形がそのまま出力される。
+//! チャンクは時間ベースなので、レートと [`StreamConfig::chunk_ms`] に応じて
+//! [`AudioChunk::frames`] が変わる。既定 20ms では 48k=960 / 16k=320 / 8k=160。
+//! 既定 `{48000, 2}` のときは第 2 段がパススルーになり、内部正規形がそのまま出力
+//! される。
 
 use bitflags::bitflags;
 
@@ -33,12 +34,12 @@ bitflags! {
     }
 }
 
-/// 正規化済み 20ms オーディオチャンク。
+/// 正規化済みオーディオチャンク。
 ///
 /// `data` は interleaved `f32`（出力チャンネル順）で、長さは
-/// `frames * output.channels`。チャンクは時間ベースで 20ms なので、出力レートに
-/// 応じて `frames` が変わる（48k=960 / 16k=320 / 8k=160）。既定の出力 `{48000, 2}`
-/// では `frames == 960`（1920 サンプル）。
+/// `frames * output.channels`。チャンクは設定された時間幅なので、出力レートに
+/// 応じて `frames` が変わる。既定の 20ms・出力 `{48000, 2}` では
+/// `frames == 960`（1920 サンプル）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioChunk {
     /// interleaved `f32` サンプル。長さ = `frames * output.channels`。
@@ -60,7 +61,7 @@ pub struct AudioChunk {
     pub rms: f32,
 }
 
-/// One 20ms chunk of a secondary output tap.
+/// One chunk of a secondary output tap.
 ///
 /// A secondary tap is an additional rendering of the same capture in its own
 /// format (see [`StreamConfig::secondary_output`]). It always carries `f32`
@@ -225,9 +226,20 @@ impl OutputFormat {
         Ok(())
     }
 
-    /// 出力レートでの 20ms チャンクのフレーム数（48k=960 / 16k=320 / 8k=160）。
+    /// 既定の 20ms チャンクのフレーム数（48k=960 / 16k=320 / 8k=160）。
     pub fn chunk_frames(&self) -> usize {
-        (self.sample_rate as usize * 20) / 1000
+        self.chunk_frames_for(20)
+    }
+
+    /// 指定したチャンク長（ミリ秒）に対応するフレーム数を返す。
+    ///
+    /// `chunk_ms` は呼び出し側で 1 以上に検証する。サンプルレートの丸めで 0 に
+    /// ならないよう、返り値は常に 1 以上。
+    pub fn chunk_frames_for(&self, chunk_ms: u32) -> usize {
+        ((self.sample_rate as u64 * chunk_ms as u64) / 1000)
+            .max(1)
+            .try_into()
+            .unwrap_or(usize::MAX)
     }
 }
 
@@ -263,7 +275,7 @@ pub struct StreamConfig {
     pub device_id: Option<String>,
     /// ソース種別。
     pub kind: SourceKind,
-    /// チャンク長（ミリ秒）。20 固定。
+    /// チャンク長（ミリ秒）。1 以上。既定は 20。
     pub chunk_ms: u32,
     /// チャンクリングの容量（チャンク数）。満杯時は DROP_OLDEST。
     pub ring_capacity_chunks: usize,
@@ -455,6 +467,16 @@ mod tests {
             .chunk_frames(),
             160
         );
+    }
+
+    #[test]
+    fn output_format_chunk_frames_support_custom_duration() {
+        let format = OutputFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        assert_eq!(format.chunk_frames_for(10), 480);
+        assert_eq!(format.chunk_frames_for(25), 1_200);
     }
 
     #[test]
