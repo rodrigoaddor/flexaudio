@@ -36,6 +36,12 @@ stream.stop();
 - Output is normalized interleaved `f32` at a sample rate / channel count you
   choose (two-stage resampling internally).
 
+`StreamConfig::mute_playback` is `false` by default. Set it to `true` for
+macOS `SystemLoopback` capture to mute local playback at the Core Audio tap;
+the captured samples are unchanged, but the captured output is prevented from
+reaching the selected hardware device. This requires macOS 14.4 or later and
+is currently unsupported on Linux and Windows.
+
 ## Install
 
 ```sh

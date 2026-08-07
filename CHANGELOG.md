@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added `StreamConfig::mute_playback`, defaulting to `false`. macOS system-output
+  capture can now mute local playback at the Core Audio process tap without
+  changing captured samples; Linux and Windows report the option as unsupported.
+
 ## [0.2.0] - 2026-06-17
 
 The first Rust workspace release — a ground-up Rust rewrite of the earlier prototype.

@@ -17,6 +17,14 @@ Because the ObjC objects involved (`Retained<CATapDescription>`, `RcBlock`,
 dedicated thread; only `Send`-safe handles (stop flag, `JoinHandle`, cached format)
 cross thread boundaries.
 
+`MacSystemBackend::new_with_mute(..., true)` configures the system-output tap
+with `CATapMuteBehavior::Muted`: captured samples remain available to the
+IOProc, while the captured output is not sent to the selected hardware device.
+Destroying the tap during `stop` or `Drop` restores local playback. The public
+`flexaudio::StreamConfig::mute_playback` option uses this path for
+`SystemLoopback` capture. Muting requires macOS 14.4 or later; it is not
+implemented by the Linux or Windows backends.
+
 **Platform requirement:** Core Audio Process Taps require **macOS 14.4 or later**.
 Attempting to start a backend on an older OS returns `Error::UnsupportedOsVersion`.
 The crate compiles as an empty stub on non-macOS targets

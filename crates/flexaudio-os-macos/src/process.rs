@@ -118,7 +118,7 @@ impl CaptureBackend for MacProcessBackend {
                         return;
                     }
                 };
-                run_tap_thread(kind, sink, stop_flag, ready_tx);
+                run_tap_thread(kind, sink, false, stop_flag, ready_tx);
             })
             .map_err(|e| Error::Backend(format!("spawn macos process thread: {e}")))?;
 

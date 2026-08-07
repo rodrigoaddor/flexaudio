@@ -104,8 +104,9 @@ pub fn watch_devices() -> Result<DeviceWatcher> {
 /// - [`SourceKind::SystemLoopback`] → Linux / Windows / macOS
 ///   （Linux: [`flexaudio_os_linux::PwSystemBackend`]＝出力の monitor / PipeWire。
 ///   Windows: `flexaudio_os_windows::WasapiSystemBackend`＝render endpoint の
-///   WASAPI loopback）。`config.exclude_self`（自ホスト除外）と `config.device_id`
-///   （出力エンドポイント選択・`None` で既定出力）をそのまま渡す。
+///   WASAPI loopback）。`config.exclude_self`（自ホスト除外）、`config.mute_playback`
+///   （macOS のみのローカル再生ミュート）、`config.device_id`（出力エンドポイント選択・
+///   `None` で既定出力）をそのまま渡す。
 ///   その他 OS では [`Error::Unsupported`]。
 /// - [`SourceKind::ProcessLoopback`] → Linux / Windows / macOS
 ///   （Linux: [`flexaudio_os_linux::PwProcessBackend`]。Windows:
@@ -116,8 +117,10 @@ pub fn watch_devices() -> Result<DeviceWatcher> {
 ///   持つ合成バックエンド。各子を 48k/stereo へ揃えて側別ゲイン
 ///   （`config.mix_mic_gain` / `config.mix_system_gain`）で加算合成し、1 本の
 ///   ストリームとして届ける。デバイスは `config.mix_mic_device_id` /
-///   `config.mix_system_device_id` で選ぶ（`None` で既定）。`config.exclude_self` は
-///   system 側に適用される。system 側が非対応の OS では [`Error::Unsupported`]。
+///   `config.mix_system_device_id` で選ぶ（`None` で既定）。`config.exclude_self` と
+///   `config.mute_playback` は system 側に適用される。`mute_playback` は macOS のみ対応し、
+///   Linux / Windows では通常の再生を維持して警告を出す。system 側が非対応の OS では
+///   [`Error::Unsupported`]。
 ///
 /// process ソースは `config.mode` だけを見て `config.exclude_self` を無視し、system
 /// ソースは `config.exclude_self` だけを見て `config.mode` を無視する。両者を合成せず、
@@ -197,6 +200,19 @@ pub(crate) fn build_backend(config: &StreamConfig) -> Result<Box<dyn CaptureBack
     // 関数頭で use する。
     use flexaudio_core::types::Error;
 
+    #[cfg(target_os = "linux")]
+    if config.mute_playback {
+        eprintln!(
+            "[flexaudio] warning: mute_playback is unsupported on Linux; local playback remains enabled"
+        );
+    }
+    #[cfg(target_os = "windows")]
+    if config.mute_playback {
+        eprintln!(
+            "[flexaudio] warning: mute_playback is unsupported on Windows; local playback remains enabled"
+        );
+    }
+
     let backend: Box<dyn CaptureBackend> = match config.kind {
         // マイク入力は全 OS 共通（cpal）。device_id で特定入力デバイスを選べる
         // （None=既定入力デバイス。id は devices() が返す安定 ID = デバイス名）。
@@ -206,9 +222,11 @@ pub(crate) fn build_backend(config: &StreamConfig) -> Result<Box<dyn CaptureBack
         // システム出力ループバックは Linux / Windows / macOS 対応。
         // exclude_self（自ホスト除外）と device_id（出力エンドポイント選択）を backend へ
         // 渡す。mode は見ない。device_id=None で既定出力。
-        SourceKind::SystemLoopback => {
-            build_system_backend(config.exclude_self, config.device_id.clone())?
-        }
+        SourceKind::SystemLoopback => build_system_backend(
+            config.exclude_self,
+            config.mute_playback,
+            config.device_id.clone(),
+        )?,
 
         // プロセス出力ループバックは Linux / Windows / macOS 対応・target_pid 必須。
         // mode（Include/Exclude）を backend へ渡す。exclude_self は見ない。
@@ -260,8 +278,11 @@ pub(crate) fn build_backend(config: &StreamConfig) -> Result<Box<dyn CaptureBack
             ));
             // exclude_self は Mix では system 側に適用する（フィードバック防止の意図は
             // system 単独と同じ）。非対応 OS はここで Unsupported になる。
-            let system =
-                build_system_backend(config.exclude_self, config.mix_system_device_id.clone())?;
+            let system = build_system_backend(
+                config.exclude_self,
+                config.mute_playback,
+                config.mix_system_device_id.clone(),
+            )?;
             Box::new(mix::CompositeBackend::new(
                 mic,
                 system,
@@ -282,10 +303,12 @@ pub(crate) fn build_backend(config: &StreamConfig) -> Result<Box<dyn CaptureBack
 /// Linux / Windows / macOS 以外は [`Error::Unsupported`]。
 fn build_system_backend(
     exclude_self: bool,
+    mute_playback: bool,
     device_id: Option<String>,
 ) -> Result<Box<dyn CaptureBackend>> {
     #[cfg(target_os = "linux")]
     {
+        let _ = mute_playback;
         Ok(Box::new(flexaudio_os_linux::PwSystemBackend::new(
             exclude_self,
             device_id,
@@ -293,6 +316,7 @@ fn build_system_backend(
     }
     #[cfg(target_os = "windows")]
     {
+        let _ = mute_playback;
         Ok(Box::new(flexaudio_os_windows::WasapiSystemBackend::new(
             exclude_self,
             device_id,
@@ -300,14 +324,17 @@ fn build_system_backend(
     }
     #[cfg(target_os = "macos")]
     {
-        Ok(Box::new(flexaudio_os_macos::MacSystemBackend::new(
-            exclude_self,
-            device_id,
-        )))
+        Ok(Box::new(
+            flexaudio_os_macos::MacSystemBackend::new_with_mute(
+                exclude_self,
+                device_id,
+                mute_playback,
+            ),
+        ))
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
-        let _ = (exclude_self, device_id);
+        let _ = (exclude_self, mute_playback, device_id);
         Err(flexaudio_core::types::Error::Unsupported)
     }
 }

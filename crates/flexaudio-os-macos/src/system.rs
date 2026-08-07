@@ -27,6 +27,9 @@
 //! `exclude_self == true` のときは `device_id` を無視し、既定出力の自プロセス除外 tap にする
 //! （自分の音の除外を優先）。
 //!
+//! `mute_playback` は system ソースの tap にだけ適用され、キャプチャした音声を選択した
+//! 出力デバイスへ流さない。tap を破棄すると Core Audio が通常の再生経路を復元する。
+//!
 //! # スレッド / Send
 //! tap/aggregate/ioproc 周りの `!Send` な ObjC オブジェクト（[`TapChain`]）は専用スレッド内に
 //! 閉じ込め、[`MacSystemBackend`] が保持するのは `Send` なものだけ（停止フラグ・[`JoinHandle`]・
@@ -62,6 +65,8 @@ pub struct MacSystemBackend {
     /// 既定出力の global tap、`Some(name)` でその出力デバイスを対象にする。`exclude_self == true`
     /// のときは無視される。
     device_id: Option<String>,
+    /// Core Audio tap 作成時に対象出力をミュートするか。
+    mute_playback: bool,
     /// 起動中フラグ（二重 start ガード / 停止指示 / drop 判定）。`Send`。
     stop_flag: Arc<AtomicBool>,
     /// tap チェーンを所有するスレッドのハンドル（start 後に `Some`）。
@@ -86,9 +91,23 @@ impl MacSystemBackend {
     /// あるので、tap 無しで安全に得られるフォールバックを使う。Normalizer は出力 20ms 時間ベース
     /// なので、多少のネイティブ推定差は第 1 段リサンプルで吸収される。
     pub fn new(exclude_self: bool, device_id: Option<String>) -> Self {
+        Self::new_with_mute(exclude_self, device_id, false)
+    }
+
+    /// システム loopback バックエンドを構築し、必要ならローカル再生をミュートする。
+    ///
+    /// `mute_playback` は macOS 14.4 以降の Core Audio process tap にのみ適用される。
+    /// `true` では tap がキャプチャした音声を選択した出力デバイスへ送らず、`stop` / `Drop`
+    /// 時の tap 破棄で再生経路が復元される。
+    pub fn new_with_mute(
+        exclude_self: bool,
+        device_id: Option<String>,
+        mute_playback: bool,
+    ) -> Self {
         Self {
             exclude_self,
             device_id,
+            mute_playback,
             stop_flag: Arc::new(AtomicBool::new(false)),
             handle: None,
             native: FALLBACK_FORMAT,
@@ -125,6 +144,7 @@ impl CaptureBackend for MacSystemBackend {
         let exclude_self = self.exclude_self;
         // device_id（String）はクロージャへ move する。exclude_self のときは使わない。
         let device_id = self.device_id.clone();
+        let mute_playback = self.mute_playback;
 
         let handle = thread::Builder::new()
             .name("flexaudio-macos-system".into())
@@ -163,7 +183,7 @@ impl CaptureBackend for MacSystemBackend {
                     // 既定出力。除外なしの全システム音。PID 変換不要。
                     TapKind::ExcludeProcesses(Vec::new())
                 };
-                run_tap_thread(kind, sink, stop_flag, ready_tx);
+                run_tap_thread(kind, sink, mute_playback, stop_flag, ready_tx);
             })
             .map_err(|e| Error::Backend(format!("spawn macos system thread: {e}")))?;
 
@@ -209,6 +229,7 @@ impl Drop for MacSystemBackend {
 pub(crate) fn run_tap_thread(
     kind: TapKind,
     sink: RawSink,
+    mute_playback: bool,
     stop_flag: Arc<AtomicBool>,
     ready_tx: mpsc::Sender<Result<()>>,
 ) {
@@ -219,7 +240,7 @@ pub(crate) fn run_tap_thread(
         TapKind::ExcludeProcessesOnDevice { .. } => "flexaudio-system-device-tap",
     };
     // SAFETY: build_tap_chain は CoreAudio を叩く。sink を block へ move する。
-    let chain: TapChain = match unsafe { build_tap_chain(kind, label, sink) } {
+    let chain: TapChain = match unsafe { build_tap_chain(kind, label, mute_playback, sink) } {
         Ok(c) => c,
         Err(e) => {
             let _ = ready_tx.send(Err(e));

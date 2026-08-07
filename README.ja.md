@@ -38,6 +38,12 @@ stream.stop();
 - **システム / プロセス単位** のキャプチャは、コンパイル時に選択されたネイティブ OS バックエンドを使用します。特定の OS でサポートされていないソースを呼び出した場合は `Error::Unsupported` が返ります。
 - プロセス単位のキャプチャには `StreamConfig` の `target_pid` が必要です。
 
+システム出力キャプチャで `StreamConfig::mute_playback = true` を指定すると、macOS の
+Core Audio tap を `Muted` モードで動作させられます。このオプションは現在 macOS 専用で、
+macOS 14.4 以降が必要です。Linux / Windows では無視され、警告が出ます。macOS では
+`SystemLoopback`（および `Mix` の system 側）に適用され、キャプチャしたサンプルは変えずに、
+キャプチャ対象の出力が選択したハードウェアデバイスへ届くのを防ぎます。既定値は `false` です。
+
 ---
 
 ## インストール

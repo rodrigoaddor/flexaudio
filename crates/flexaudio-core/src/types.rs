@@ -244,7 +244,7 @@ impl Default for OutputFormat {
 /// 1 ストリームを開くための構成。
 ///
 /// [`Default`] は `chunk_ms = 20`, `ring_capacity_chunks = 50`, `mode = Include`,
-/// `exclude_self = false`, `kind = Mic`, `output = {48000, 2}`, `gain = 1.0`,
+/// `exclude_self = false`, `mute_playback = false`, `kind = Mic`, `output = {48000, 2}`, `gain = 1.0`,
 /// `mix_mic_device_id = None`, `mix_system_device_id = None`, `mix_mic_gain = 1.0`,
 /// `mix_system_gain = 1.0` を返す。
 ///
@@ -278,6 +278,13 @@ pub struct StreamConfig {
     /// する。[`SourceKind::Mix`] では system 側の子キャプチャに適用される。
     /// それ以外のソースでは無視される。
     pub exclude_self: bool,
+    /// システム出力キャプチャ時に、キャプチャ対象のローカル再生をミュートするか。
+    ///
+    /// 現在は macOS の [`SourceKind::SystemLoopback`]（および `Mix` の system 側）でのみ
+    /// 対応し、Core Audio tap の `CATapMuteBehavior::Muted` を使う。既定値は `false`
+    /// で、既存のローカル再生を維持する。Linux / Windows では未対応で、要求時に警告を
+    /// 出して通常の再生を維持する。process / mic ソースでは無視される。
+    pub mute_playback: bool,
     /// 出力チャンクのフォーマット。既定 `{48000, 2}`（パススルー）。
     pub output: OutputFormat,
     /// 副出力タップのフォーマット（省略 = 副タップなし）。
@@ -320,6 +327,7 @@ impl Default for StreamConfig {
             target_pid: None,
             mode: ProcessMode::Include,
             exclude_self: false,
+            mute_playback: false,
             output: OutputFormat::default(),
             secondary_output: None,
             gain: 1.0,
@@ -403,6 +411,7 @@ mod tests {
         assert_eq!(c.ring_capacity_chunks, 50);
         assert_eq!(c.mode, ProcessMode::Include);
         assert!(!c.exclude_self);
+        assert!(!c.mute_playback);
         assert_eq!(c.kind, SourceKind::Mic);
         assert_eq!(c.device_id, None);
         assert_eq!(c.target_pid, None);

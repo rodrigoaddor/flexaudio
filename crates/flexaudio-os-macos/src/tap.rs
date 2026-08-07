@@ -27,7 +27,7 @@ use objc2_core_audio::{
     kAudioSubTapUIDKey, AudioDeviceCreateIOProcIDWithBlock, AudioDeviceDestroyIOProcID,
     AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
     AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
-    AudioHardwareDestroyProcessTap, AudioObjectID, CATapDescription,
+    AudioHardwareDestroyProcessTap, AudioObjectID, CATapDescription, CATapMuteBehavior,
 };
 use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp};
 use objc2_core_foundation::CFDictionary;
@@ -148,6 +148,7 @@ fn cstr_key(key: &std::ffi::CStr) -> Retained<NSString> {
 pub(crate) unsafe fn build_tap_chain(
     kind: TapKind,
     name: &str,
+    mute_playback: bool,
     sink: RawSink,
 ) -> Result<TapChain, Error> {
     // 1) CATapDescription（INCLUDE = mixdown / EXCLUDE = global-but-exclude /
@@ -179,6 +180,15 @@ pub(crate) unsafe fn build_tap_chain(
     };
     desc.setName(&NSString::from_str(name));
     desc.setPrivate(true);
+    // For muted taps, keep Core Audio's process membership bookkeeping intact if a tapped process
+    // exits while the tap is alive. Leave this disabled for the legacy unmuted path. Destroying
+    // the tap below is still what restores local playback.
+    desc.setProcessRestoreEnabled(mute_playback);
+    desc.setMuteBehavior(if mute_playback {
+        CATapMuteBehavior::Muted
+    } else {
+        CATapMuteBehavior::Unmuted
+    });
     // aggregate の sub-tap UID に使う tap の UUID 文字列。
     let uuid_str: Retained<NSString> = desc.UUID().UUIDString();
 
@@ -294,6 +304,7 @@ pub(crate) unsafe fn build_tap_chain(
     // 6) start。
     let status = AudioDeviceStart(aggregate_id, io_proc_id);
     if status != NO_ERR {
+        stopped.store(true, Ordering::Release);
         let _ = AudioDeviceDestroyIOProcID(aggregate_id, io_proc_id);
         let _ = AudioHardwareDestroyAggregateDevice(aggregate_id);
         let _ = AudioHardwareDestroyProcessTap(tap_id);

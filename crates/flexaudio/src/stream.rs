@@ -793,6 +793,7 @@ impl Stream {
             target_pid: new_config.target_pid,
             mode: new_config.mode,
             exclude_self: new_config.exclude_self,
+            mute_playback: new_config.mute_playback,
             ..self.config.clone()
         };
         Ok(())

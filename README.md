@@ -45,6 +45,13 @@ Three capture sources × three operating systems. ✅ = implemented and verified
   `Error::Unsupported`.
 - Per-process capture requires a `target_pid` in `StreamConfig`.
 
+For system-output capture, set `StreamConfig::mute_playback = true` to use the
+macOS Core Audio tap in `Muted` mode. This option is currently macOS-only and
+requires macOS 14.4 or later; on Linux and Windows it is ignored with a
+warning. On macOS it applies to `SystemLoopback` (and the system side of
+`Mix`), preventing captured output from reaching the selected hardware device
+while leaving the captured samples unchanged. The default is `false`.
+
 ---
 
 ## Install
