@@ -405,6 +405,9 @@ pub struct StreamConfig {
     /// exclusion set. This applies to the system-side child capture of
     /// [`SourceKind::Mix`] and is ignored by microphone and process sources.
     pub exclude_self: bool,
+    /// Mute captured system playback on macOS (also applies to the system side of Mix).
+    /// Ignored for microphone/process sources; unsupported platforms retain playback.
+    pub mute_playback: bool,
     /// Enable the macOS silence diagnostic signal (default true). After sustained
     /// exact zeros with active source output, a private probe renders a quiet tone.
     /// False disables the probe for system/process capture and the system Mix lane.
@@ -480,6 +483,7 @@ impl Default for StreamConfig {
             target_pid: None,
             mode: ProcessMode::Include,
             exclude_self: false,
+            mute_playback: false,
             silence_probe: true,
             exclude_pids: Vec::new(),
             output: OutputFormat::default(),

@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > changes; **patch** bumps (`0.2.0 → 0.2.1`) remain backward-compatible. Pin to
 > `0.8` to receive only compatible updates.
 
+## Fork additions
+
+### Added
+- Added `StreamConfig::mute_playback`, defaulting to `false`. macOS system-output
+  capture can now mute local playback at the Core Audio process tap without
+  changing captured samples; Linux and Windows report the option as unsupported.
+
 ## [0.8.1] - 2026-10-20
 
 ### Fixed

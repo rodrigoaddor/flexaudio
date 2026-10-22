@@ -138,6 +138,7 @@ pub struct MacSystemBackend {
     /// `None` validates the default output before a global tap; `Some(id)` targets that device.
     /// Process exclusions also apply to the selected device.
     device_id: Option<String>,
+    mute_playback: bool,
     /// Running flag (guards repeated start, signals stop, and tracks drop state). `Send`.
     stop_flag: Arc<AtomicBool>,
     silence_probe: bool,
@@ -171,7 +172,17 @@ impl MacSystemBackend {
     /// the tap's full native description against the sink and rejects mismatches with
     /// `NativeFormatChanged` before delivering samples.
     pub fn new(exclude_self: bool, device_id: Option<String>) -> Self {
+        Self::new_with_mute(exclude_self, device_id, false)
+    }
+
+    /// Create a system tap that optionally mutes local playback until its destruction.
+    pub fn new_with_mute(
+        exclude_self: bool,
+        device_id: Option<String>,
+        mute_playback: bool,
+    ) -> Self {
         Self {
+            mute_playback,
             exclude_self,
             exclude_pids: Vec::new(),
             device_id,
@@ -252,6 +263,7 @@ impl CaptureBackend for MacSystemBackend {
         }
         // Move device_id (String) into the closure for owner-thread UID resolution.
         let device_id = self.device_id.clone();
+        let mute_playback = self.mute_playback;
 
         let handle = thread::Builder::new()
             .name("flexaudio-macos-system".into())
@@ -295,6 +307,7 @@ impl CaptureBackend for MacSystemBackend {
                     TapThreadConfig {
                         kind,
                         silence_probe,
+                        mute_playback,
                     },
                     sink,
                     stop_flag,
@@ -377,6 +390,7 @@ impl Drop for MacSystemBackend {
 pub(crate) struct TapThreadConfig {
     /// Process inclusion/exclusion and optional output device for the tap chain.
     pub kind: TapKind,
+    pub mute_playback: bool,
     /// Enable the bounded diagnostic probe when an active source produces silence.
     pub silence_probe: bool,
 }
@@ -405,13 +419,14 @@ pub(crate) fn run_tap_thread(
         TapKind::ExcludeProcessesOnDevice { .. } => "flexaudio-system-device-tap",
     };
     // SAFETY: build_tap_chain calls CoreAudio. Move sink into the block.
-    let mut chain: TapChain = match unsafe { build_tap_chain(kind, label, sink) } {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = ready_tx.send(Err(e));
-            return Ok(());
-        }
-    };
+    let mut chain: TapChain =
+        match unsafe { build_tap_chain(kind, label, config.mute_playback, sink) } {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+                return Ok(());
+            }
+        };
 
     if ready_tx.send(Ok(())).is_err() {
         // The caller has gone away. Drop the chain to clean up.
@@ -800,5 +815,22 @@ mod repro_tests {
     #[test]
     fn regression_unresolved_live_exclusion_fails_closed() {
         assert!(resolve_exclusion(Ok(0), false, || Ok(())).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fork_muting_tests {
+    use super::*;
+
+    #[test]
+    fn muting_is_opt_in_and_preserves_other_backend_options() {
+        assert!(!MacSystemBackend::new(false, None).mute_playback);
+        let backend = MacSystemBackend::new_with_mute(true, Some("output".into()), true)
+            .with_exclude_pids(vec![42])
+            .with_silence_probe(false);
+        assert!(backend.mute_playback);
+        assert!(backend.exclude_self);
+        assert_eq!(backend.exclude_pids, vec![42]);
+        assert!(!backend.silence_probe);
     }
 }

@@ -320,6 +320,7 @@ pub(crate) fn build_backend(
             config.exclude_pids.clone(),
             config.device_id.clone(),
             config.silence_probe,
+            config.mute_playback,
             options,
         )?,
 
@@ -372,6 +373,7 @@ pub(crate) fn build_backend(
                 config.exclude_pids.clone(),
                 config.mix_system_device_id.clone(),
                 config.silence_probe,
+                config.mute_playback,
                 options,
             )?;
             Box::new(mix::CompositeBackend::new(
@@ -399,10 +401,15 @@ fn build_system_backend(
     exclude_pids: Vec<u32>,
     device_id: Option<String>,
     silence_probe: bool,
+    mute_playback: bool,
     options: &OpenOptions,
 ) -> Result<Box<dyn CaptureBackend>> {
     #[cfg(not(target_os = "macos"))]
-    let _ = silence_probe;
+    let _ = (silence_probe, mute_playback);
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if mute_playback {
+        eprintln!("[flexaudio] warning: mute_playback is supported only on macOS; local playback remains enabled");
+    }
     #[cfg(not(target_os = "windows"))]
     let _ = options;
     #[cfg(target_os = "linux")]
@@ -423,9 +430,13 @@ fn build_system_backend(
     #[cfg(target_os = "macos")]
     {
         Ok(Box::new(
-            flexaudio_os_macos::MacSystemBackend::new(exclude_self, device_id)
-                .with_exclude_pids(exclude_pids)
-                .with_silence_probe(silence_probe),
+            flexaudio_os_macos::MacSystemBackend::new_with_mute(
+                exclude_self,
+                device_id,
+                mute_playback,
+            )
+            .with_exclude_pids(exclude_pids)
+            .with_silence_probe(silence_probe),
         ))
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]

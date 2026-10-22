@@ -53,6 +53,7 @@ fn default_stream_config_matches_contract() {
     assert_eq!(c.ring_capacity_chunks, 50);
     assert_eq!(c.mode, ProcessMode::Include);
     assert!(!c.exclude_self);
+    assert!(!c.mute_playback);
     assert!(c.exclude_pids.is_empty(), "no pids excluded by default");
     assert_eq!(c.kind, SourceKind::Mic);
     assert_eq!(c.device_id, None);

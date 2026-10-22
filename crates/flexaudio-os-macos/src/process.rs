@@ -157,6 +157,7 @@ impl CaptureBackend for MacProcessBackend {
                     TapThreadConfig {
                         kind,
                         silence_probe,
+                        mute_playback: false,
                     },
                     sink,
                     stop_flag,

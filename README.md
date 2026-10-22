@@ -295,6 +295,13 @@ connection or server sync is `Unknown`. The bounded probe may wait for the audio
 service, so use a worker thread in GUI applications. Node and CLI JSON spell the
 statuses `supported`, `unavailable`, and `unknown`; Python uses the same tags.
 
+For system-output capture, set `StreamConfig::mute_playback = true` to use the
+macOS Core Audio tap in `Muted` mode. This option is currently macOS-only and
+requires macOS 14.4 or later; on Linux and Windows it is ignored with a
+warning. On macOS it applies to `SystemLoopback` (and the system side of
+`Mix`), preventing captured output from reaching the selected hardware device
+while leaving the captured samples unchanged. The default is `false`.
+
 ---
 
 ## Install

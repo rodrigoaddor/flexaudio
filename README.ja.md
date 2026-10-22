@@ -285,6 +285,12 @@ Linux では PipeWire のソケットがなければ `Unavailable`、ソケッ�
 待つ場合があるため、GUI アプリではワーカースレッドを使ってください。Node と CLI の JSON は
 状態を `supported`、`unavailable`、`unknown` と表し、Python も同じタグを使います。
 
+システム出力キャプチャで `StreamConfig::mute_playback = true` を指定すると、macOS の
+Core Audio tap を `Muted` モードで動作させられます。このオプションは現在 macOS 専用で、
+macOS 14.4 以降が必要です。Linux / Windows では無視され、警告が出ます。macOS では
+`SystemLoopback`（および `Mix` の system 側）に適用され、キャプチャしたサンプルは変えずに、
+キャプチャ対象の出力が選択したハードウェアデバイスへ届くのを防ぎます。既定値は `false` です。
+
 ---
 
 ## インストール
